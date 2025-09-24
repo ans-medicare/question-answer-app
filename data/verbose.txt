@@ -1,0 +1,23 @@
+Q: What is Medicare Prescription Payment Plan?
+A: The Medicare Prescription Payment Plan allows you to spread your out-of-pocket prescription drug costs throughout the year, rather than paying at the pharmacy counter.Instead of a large cost at the pharmacy, you'll receive a monthly bill from your drug plan.This option does not lower your overall drug costs but can help you manage expenses by making predictable payments, especially if your costs are high and concentrated in certain months.To use the plan, you must opt-in through your Medicare drug plan and will be responsible for monthly payments until your year-to-date out-of-pocket costs are paid.
+
+Q: What is Encounter Data Processing System (EDPS)?
+A: A system used by the Centers for Medicare & Medicaid Services (CMS) to collect and manage encounter data from healthcare providers.This system helps in submitting, correcting, and resubmitting encounter data, ensuring accuracy and compliance with HIPAA.
+
+Q: What is Recon?
+A: The process of comparing different sets of data such as enrollment records, payments, and membership reports to identify and resolve discrepancies.Primarily Medicare Advantage (Part C) plans and Part D plans.Ensure accurate financial data between what the plan calculates and what CMS reports.Maximize revenue by identifying and correcting any financial or enrollment errors.Maintain compliance with CMS regulations. 
+
+Q: What is eEnroll360?
+A: The eEnroll360 solution enhances member engagement throughout various touchpoints by offering a combination of SaaS (Software-as-a-Service) and BPaaS (Business Process as a Service) solutions for Health Plans.It improves the member eligibility experience during enrollment, streamlines agent management and commission processing to ensure optimal payments to brokers, and conducts health risk assessments before and after enrollment.The solution places the members at the center, prioritizing their needs and satisfaction.
+
+Q: What is Member360?
+A: Member360 is a fully automated and revolutionary BPaaS solution for Medicare Advantage, Medicaid, Special Needs and Medicare supplemental Plans.With over 3 million Medicare lives, Wipro’s preconfigured solution can be quickly deployed to meet your speed to market needs.Built with the sole purpose of CMS compliance, Member360 streamlines member journey from Application to Explaination of Benefits (EOB).
+
+Q: What is Revenue360?
+A: Revenue360 is a fully automated reconciliation solution of CMS Beneficiary enrollment & payment data with Plan membership data and expected payments.Over 25+ Health Plans and 80+ MAPD Contracts use Revenue360 to maximize their revenue by recovering lost payments.The solution enhances the overall staff productivity and satisfaction.
+
+Q: What is AG360?
+A: Appeals and Grievances System (AG360) is highly customizable and configurable module that helps Payers eliminate manual process, improves Compliance, automate correspondence, create the required reports, improve member satisfaction and in turn improve STAR rating.AG360 is a modular SaaS web platform that streamlines the appeals and grievances life cycle by identifying processing and tracking cases at each stage of the process.The system provides the ability to prioritize cases, set up stringent turnaround time and configurable alerts to ensure timely outreach.
+
+Q: What is Claims360?
+A: Claims360 solution with core administrative processing provides comprehensive support for members, providers, benefit plans, provider reimbursement and payment arrangements, claims, encounters, authorizations, and more for all lines of business and payers across the healthcare landscape.Claims360 can automatically processes medical, dental and other ancillary claim types such a vision.The Medical claims include professional and institutional forms.Dental is also processed on its own claim form.
