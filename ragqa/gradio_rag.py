@@ -1,321 +1,167 @@
-# gradio_rag_autoload_app_text_to_voice_slowtype.py
 
 import os
-from pathlib import Path
+import faiss
+import json
+import torch
+import glob
 import gradio as gr
-from langchain.document_loaders import PyMuPDFLoader, TextLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.chains import RetrievalQA
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
-from langchain.llms import HuggingFacePipeline
-import tempfile
-import pyttsx3
-
-# ----------------------------
-# CONFIG
-# ----------------------------
-DOCUMENT_FOLDER = "./data"       # Folder with all your PDFs/TXTs
-FAISS_INDEX_PATH = "faiss_index"
-MODEL_NAME = "google/flan-t5-base"  # Use base model for better detail
-CHUNK_SIZE = 600                     # Larger chunks for complete coverage
-CHUNK_OVERLAP = 100
-TOP_K = 4                           # More chunks for comprehensive answers
-
-# ----------------------------
-# Global objects
-# ----------------------------
-vectorstore = None
-qa_chain = None
-# Removed global tts_engine - now created fresh for each request
-
-# ----------------------------
-# TTS Engine is now initialized per request to avoid hanging
-# ----------------------------
-
-# ----------------------------
-# Load embeddings once
-# ----------------------------
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-# ----------------------------
-# Custom prompt for detailed answers
-# ----------------------------
-def get_detailed_prompt():
-    from langchain.prompts import PromptTemplate
-    
-    template = """Based on the following context, provide a complete and comprehensive answer to the question.
-    Include all relevant details, features, and information available in the context.
-    If the context contains structured information (bullet points, lists, features), include ALL of them.
-    Stay focused on the specific topic asked about.
-
-    Context: {context}
-
-    Question: {question}
-
-    Complete Answer: """
-    
-    return PromptTemplate(template=template, input_variables=["context", "question"])
-
-# ----------------------------
-# STEP 1: Load all documents from folder and create / load vectorstore
-# ----------------------------
-def initialize_vectorstore():
-    global vectorstore, qa_chain
-    os.makedirs(DOCUMENT_FOLDER, exist_ok=True)
-
-    # Load existing vectorstore if available
-    if Path(FAISS_INDEX_PATH).exists():
-        vectorstore = FAISS.load_local(FAISS_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
-    else:
-        docs = []
-        for fname in os.listdir(DOCUMENT_FOLDER):
-            filepath = os.path.join(DOCUMENT_FOLDER, fname)
-            if filepath.endswith(".pdf"):
-                loader = PyMuPDFLoader(filepath)
-            elif filepath.endswith(".txt"):
-                loader = TextLoader(filepath)
-            else:
-                continue
-            try:
-                docs.extend(loader.load())
-            except Exception as e:
-                print(f"Error loading {filepath}: {e}")
-                continue
-
-        if not docs:
-            raise ValueError(f"No documents found in {DOCUMENT_FOLDER}")
-
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=CHUNK_SIZE, 
-            chunk_overlap=CHUNK_OVERLAP,
-            separators=[
-                "\n\n## ",      # Section breaks with headers (highest priority)
-                "\n## ",        # Preserve section headers
-                "\n\n### ",     # Subsection breaks
-                "\n### ",       # Preserve subsection headers
-                "\n\n",         # Paragraph breaks
-                "\n- ",         # Bullet points
-                "\n",           # Line breaks
-                ". ",           # Sentences
-                " "             # Words (last resort)
-            ],
-            keep_separator=True,
-            length_function=len,
-            is_separator_regex=False
-        )
-        docs_chunks = splitter.split_documents(docs)
-        vectorstore = FAISS.from_documents(docs_chunks, embeddings)
-        vectorstore.save_local(FAISS_INDEX_PATH)
-
-    # Load Flan-T5 and build QA chain
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
-    text_gen_pipeline = pipeline(
-        "text2text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        device=-1,
-        max_new_tokens=150,             # Reduced for faster generation
-        do_sample=True,                 # Enable sampling for more varied responses
-        temperature=0.2,                # Lower temperature for more focused responses
-        top_p=0.85,                     # Slightly more focused nucleus sampling
-        pad_token_id=tokenizer.eos_token_id
-    )
-    llm = HuggingFacePipeline(pipeline=text_gen_pipeline)
-
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        retriever=vectorstore.as_retriever(
-            search_kwargs={
-                "k": 3,         # Reduced for faster retrieval
-                "fetch_k": 20   # Reduced for faster selection
-            }
-        ),
-        return_source_documents=False,   # Don't return sources for speed
-        chain_type="stuff",              # Keep related information together
-        chain_type_kwargs={
-            "prompt": get_detailed_prompt()  # Custom prompt for structured answers
-        }
-    )
-
-    print(f"✅ Vectorstore initialized with {len(vectorstore.index_to_docstore_id)} chunks.")
-
-
-# ----------------------------
-# STEP 2: Ask a question with streaming response
-# ----------------------------
 import time
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from sentence_transformers import SentenceTransformer
+import numpy as np
 
-def ask_question_streaming(query):
-    """Generator function that yields text progressively for typewriter effect"""
-    global qa_chain
-    if qa_chain is None:
-        yield "⚠️ QA system not initialized.", None
-        return
+# ================= CONFIG =================
+VECTOR_STORE_PATH = "vector_store.index"
+METADATA_PATH = "vector_store_meta.json"
+DOCS_FOLDER = "/data"
+TOP_K = 5  # initial search before strict filtering
 
-    try:
-        # Get the complete answer first
-        response = qa_chain(query)
-        answer = response["result"]
-        
-        # Check if we got a good structured answer
-        if len(answer.strip()) < 30 or "don't have enough information" in answer.lower():
-            # Try with more context-seeking query
-            contextual_query = f"What information is available about {query}? Include all details and structure."
-            response = qa_chain(contextual_query)
-            answer = response["result"]
-        
-        # Stream the text letter by letter
-        displayed_text = ""
-        for char in answer:
-            displayed_text += char
-            time.sleep(0.02)  # Adjust speed here (0.02 = 50 chars/second)
-            yield displayed_text, None
-        
-        # Generate audio file after streaming is complete
-        audio_file = text_to_speech(answer)
-        yield displayed_text, audio_file
-        
-    except Exception as e:
-        error_msg = f"❌ Error processing question: {str(e)}"
-        yield error_msg, None
+# ================= LOAD MODELS =================
+print("🔄 Loading models...")
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-def ask_question(query):
-    """Non-streaming version for compatibility"""
-    global qa_chain
-    if qa_chain is None:
-        return "⚠️ QA system not initialized.", None
+embed_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+qa_model_name = 'google/flan-t5-base'
+qa_tokenizer = AutoTokenizer.from_pretrained(qa_model_name)
+qa_model = AutoModelForSeq2SeqLM.from_pretrained(qa_model_name).to(device)
+qa_model.eval()
 
-    try:
-        # Try direct query first to capture complete structured information
-        response = qa_chain(query)
-        answer = response["result"]
-        
-        # Check if we got a good structured answer
-        if len(answer.strip()) < 30 or "don't have enough information" in answer.lower():
-            # Try with more context-seeking query
-            contextual_query = f"What information is available about {query}? Include all details and structure."
-            response = qa_chain(contextual_query)
-            answer = response["result"]
-        
-        # Generate audio file
-        audio_file = text_to_speech(answer)
-        
-        return answer, audio_file
-    except Exception as e:
-        return f"❌ Error processing question: {str(e)}", None
+# ================= HELPERS =================
+def parse_qa_text(text):
+    qas = []
+    blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
+    for block in blocks:
+        if block.startswith("Q.") and "A." in block:
+            q_part, a_part = block.split("A.", 1)
+            question = " ".join(q_part.replace("Q.", "").splitlines()).strip()
+            answer = " ".join(a_part.splitlines()).strip()
+            qas.append({"question": question, "answer": answer})
+    return qas
 
+def load_and_prepare_documents(folder_path):
+    qas = []
+    for file_path in glob.glob(f"{folder_path}/*.txt"):
+        with open(file_path, "r", encoding="utf-8") as f:
+            text = f.read()
+        pairs = parse_qa_text(text)
+        for qa in pairs:
+            qas.append({
+                "question": qa["question"],
+                "answer": qa["answer"],
+                "source": os.path.basename(file_path)
+            })
+    print(f"✅ Loaded {len(qas)} Q&A pairs")
+    return qas
 
-# ----------------------------
-# STEP 3: Text to Speech function (optimized and fixed)
-# ----------------------------
-def text_to_speech(text):
-    try:
-        # Limit text length for faster processing
-        if len(text) > 800:
-            # Take first 800 characters and find the last complete sentence
-            truncated = text[:800]
-            last_period = truncated.rfind('.')
-            if last_period > 500:  # Ensure we have substantial content
-                text = truncated[:last_period + 1]
-            else:
-                text = truncated + "..."
-        
-        # Initialize TTS engine fresh for each request to avoid hanging
-        try:
-            local_tts = pyttsx3.init()
-            
-            # Set properties for faster processing
-            voices = local_tts.getProperty('voices')
-            if voices:
-                # Try to use a female voice if available
-                for voice in voices:
-                    if 'female' in voice.name.lower() or 'zira' in voice.name.lower():
-                        local_tts.setProperty('voice', voice.id)
-                        break
-                else:
-                    # Use the first available voice
-                    local_tts.setProperty('voice', voices[0].id)
-            
-            local_tts.setProperty('rate', 160)    # Slower, more comfortable speech rate
-            local_tts.setProperty('volume', 0.9)
-            
-            # Create a temporary file for the audio
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-            temp_file.close()
-            
-            # Generate speech and save to file
-            local_tts.save_to_file(text, temp_file.name)
-            local_tts.runAndWait()
-            
-            # Clean up the TTS engine
+def build_or_load_faiss(qas):
+    if os.path.exists(VECTOR_STORE_PATH) and os.path.exists(METADATA_PATH):
+        with open(METADATA_PATH, "r", encoding="utf-8") as f:
             try:
-                local_tts.stop()
-            except:
-                pass
-            
-            return temp_file.name
-            
-        except Exception as tts_error:
-            print(f"❌ TTS Error: {tts_error}")
-            return None
-            
-    except Exception as e:
-        print(f"❌ Error in text_to_speech: {e}")
-        return None
+                metadata = json.load(f)
+            except json.JSONDecodeError:
+                metadata = []
+        if metadata:
+            print(f"📂 Loaded FAISS index with {len(metadata)} Q&A pairs")
+            index = faiss.read_index(VECTOR_STORE_PATH)
+            return index, metadata
 
+    questions = [qa["question"] for qa in qas]
+    embeddings = embed_model.encode(questions, show_progress_bar=True, convert_to_numpy=True).astype("float32")
+    faiss.normalize_L2(embeddings)
+    dim = embeddings.shape[1]
+    index = faiss.IndexFlatIP(dim)
+    index.add(embeddings)
 
-# ----------------------------
-# STEP 4: Clear function
-# ----------------------------
-def clear_fields():
-    return "", "", None
+    faiss.write_index(index, VECTOR_STORE_PATH)
+    with open(METADATA_PATH, "w", encoding="utf-8") as f:
+        json.dump(qas, f, indent=2)
+    print(f"✅ Built FAISS index with {len(qas)} Q&A pairs")
+    return index, qas
 
+def retrieve_answers(query, index, metadata, top_k=TOP_K):
+    query_vec = embed_model.encode([query], convert_to_numpy=True).astype("float32")
+    faiss.normalize_L2(query_vec)
+    distances, indices = index.search(query_vec, top_k)
+    results = []
+    for i in indices[0]:
+        if i < len(metadata):
+            results.append(metadata[i])
+    return results
 
-# ----------------------------
-# Initialize vectorstore at startup
-# ----------------------------
-initialize_vectorstore()
-# Removed TTS initialization - now done per request
+def filter_strict_answers(query, retrieved):
+    query_lower = query.lower()
+    filtered = [r for r in retrieved if query_lower in r['question'].lower()]
+    return filtered if filtered else retrieved
 
-# ----------------------------
-# GRADIO UI with Streaming Support
-# ----------------------------
-with gr.Blocks() as demo:
-    gr.Markdown("## 📚 Medicare : Question and Answers with Voice")
-    gr.Markdown("*Ask detailed questions and get comprehensive answers in both text and voice with typewriter effect.*")
+# ================= LOAD / BUILD VECTOR STORE =================
+qas = load_and_prepare_documents(DOCS_FOLDER)
+index, metadata = build_or_load_faiss(qas)
 
-    query_input = gr.Textbox(
-        label="Ask a question", 
-        placeholder="Type your question here for a detailed explanation...",
-        lines=2
+# ================= GRADIO TYPEWRITER FUNCTION =================
+def qa_typewriter(user_question):
+    retrieved = retrieve_answers(user_question, index, metadata)
+    retrieved = filter_strict_answers(user_question, retrieved)
+    top_answer = retrieved[0]['answer']
+
+    output_text = ""
+    for char in top_answer:
+        output_text += char
+        time.sleep(0.01)  # typing speed
+        yield output_text
+
+# ================= GRADIO BLOCKS APP =================
+sample_questions = [
+    "What is MPPP360?",
+    "What is A&G360?",
+    "Explain eEnroll360.",
+    "What does Revenue360 do?"
+]
+
+with gr.Blocks(css="""
+    body {background-color: #f2f2f7; font-family: 'Arial', sans-serif;}
+    .gradio-container {max-width: 500px; margin:auto; padding:20px; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.1);}
+    #get_answer_btn {
+        background-color: orange !important;
+        color: white !important;
+        border: none !important;
+        transition: background-color 0.3s;
+        border-radius: 12px;
+    }
+    #get_answer_btn:hover {
+        background-color: darkorange !important;
+    }
+    #answer_box textarea {
+        border-radius: 8px !important;
+        padding: 10px !important;
+        font-size: 16px !important;
+        line-height: 1.5 !important;
+        min-height: 180px !important;  
+        max-height: 400px !important;
+        overflow-y: auto !important;
+        resize: vertical !important;
+    }
+""") as demo:
+
+    gr.Markdown("## 📱 Medicare 360 Q&A")
+    
+    question_input = gr.Textbox(
+        lines=2,
+        placeholder="Ask a question about Medicare 360 products...",
+        label="Your Question",
+        elem_id="question_box"
     )
-    
-    with gr.Row():
-        ask_button = gr.Button("Ask", variant="primary")
-        clear_button = gr.Button("Clear")
-    
     answer_output = gr.Textbox(
-        label="Detailed Answer", 
-        lines=8,
-        max_lines=15
+        label="Answer",
+        interactive=False,
+        lines=6,
+        elem_id="answer_box"
     )
-    
-    audio_output = gr.Audio(
-        label="Voice Answer",
-        type="filepath",
-        interactive=False
+    gr.Examples(
+        examples=[[q] for q in sample_questions],
+        inputs=question_input
     )
+    submit_btn = gr.Button("Get Answer", elem_id="get_answer_btn")
+    submit_btn.click(fn=qa_typewriter, inputs=question_input, outputs=answer_output, queue=True)
 
-    # Use streaming for typewriter effect
-    ask_button.click(
-        fn=ask_question_streaming, 
-        inputs=query_input, 
-        outputs=[answer_output, audio_output],
-        show_progress=True  # Shows progress indicator while streaming
-    )
-    clear_button.click(fn=clear_fields, inputs=[], outputs=[query_input, answer_output, audio_output])
 
 demo.launch()
